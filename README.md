@@ -53,13 +53,9 @@ You can compile RPM Encrypter into a standalone executable using [PyInstaller](h
 
 2. Compile the application:
    ```bash
-   pyinstaller --noconsole --onefile --icon=icon.ico --add-data "icon.ico;." gui_app.py
+   pyinstaller --onefile --windowed --name "RPM Encrypter" --icon=icon.ico --hidden-import=tkinterdnd2 --collect-data customtkinter --add-data "icon.ico;." gui_app.py
    ```
 
 ## ⚠️ Disclaimer
 
 This software is provided "as is", without warranty of any kind. While RPM Encrypter is built utilizing established cryptographic primitives, always ensure you keep secure backups of your recovery phrases and passwords. If you lose your password AND your recovery phrase, **your data will be permanently unrecoverable.**
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
