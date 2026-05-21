@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.vault
+.rpm_encrypter/
+build/
+dist/
+*.spec
+.env
