@@ -4,8 +4,6 @@ RPM Encrypter is a robust, cross-platform local file encryption utility built wi
 
 RPM Encrypter uses industry-standard cryptographic algorithms including **AES-256-GCM** for authenticated encryption, and **Argon2id** for state-of-the-art key derivation.
 
-![RPM Encrypter UI](assets/screenshot.png) *(Add a screenshot here)*
-
 ## ✨ Key Features
 
 - **Plausible Deniability (Hidden Vaults):** Create stealthy, dual-password vaults. The first password reveals benign "decoy" files, while the second password securely unlocks a hidden encrypted sector within the exact same file.
