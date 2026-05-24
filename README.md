@@ -60,4 +60,4 @@ This software is provided "as is", without warranty of any kind. While RPM Encry
 
 ## License
 
-This project is licensed under the **[GNU Affero General Public License v3.0 (AGPL-3.0)](https://github.com/kursatabayli/IHateDPI/blob/development/LICENSE)**.
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
