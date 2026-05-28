@@ -1,6 +1,5 @@
 import urllib.request
 import json
-import ssl
 
 def check_for_update(current_version: str):
     """
@@ -9,16 +8,10 @@ def check_for_update(current_version: str):
     """
     url = "https://api.github.com/repos/RPM147/File-Encrypter/releases/latest"
     
-    # Create a non-verifying SSL context just in case of local cert issues,
-    # though standard is preferred.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=5) as response:
             if response.status != 200:
                 return None
             

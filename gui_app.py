@@ -93,7 +93,7 @@ logger = logging.getLogger("RPM_GUI")
 # ------------------------------------------------------------------------------
 
 APP_NAME        = "RPM Encrypter"
-APP_VERSION     = "2.1.0"
+APP_VERSION     = "2.0.0"
 CONFIG_FILE     = Path.home() / ".rpm_encrypter.json"
 MAX_RECENT      = 8
 MAX_ATTEMPTS    = 5
@@ -1033,7 +1033,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._toggle_hidden_mode,
 
-        fg_color="#30363d", progress_color="#00d4aa", text_color="#e6edf3", button_color="#0d1117")
+        fg_color="#30363d", progress_color="#00d4aa", text_color="#e6edf3", button_color="#ffffff")
         self.hidden_mode_switch.grid(row=6, column=0, sticky="w", pady=(8, 8), padx=4)
 
         # --- Hidden Vault Controls (hidden by default) ---
@@ -1101,7 +1101,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkSwitch(opts, text="Compress Files",
                         variable=self.compress_var,
                         font=ctk.CTkFont(size=14),
-                        fg_color="#30363d", progress_color="#00d4aa", button_color="#0d1117", text_color="#e6edf3").pack(side="left", padx=(0, 10))
+                        fg_color="#30363d", progress_color="#00d4aa", button_color="#ffffff", text_color="#e6edf3").pack(side="left", padx=(0, 10))
 
         # Output directory override
         self._enc_outdir_row = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
@@ -3656,7 +3656,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             variable=self.updates_var,
             command=lambda: save_setting("check_updates", self.updates_var.get()),
             font=ctk.CTkFont(size=14),
-            fg_color="#30363d", progress_color="#00d4aa", button_color="#0d1117", text_color="#e6edf3"
+            fg_color="#30363d", progress_color="#00d4aa", button_color="#ffffff", text_color="#e6edf3"
         ).pack(side="left")
 
         # --- PROFILES ---
@@ -3773,7 +3773,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             variable=self._ver_enabled_var,
             command=self._save_versioning_settings,
 
-        fg_color="#30363d", progress_color="#00d4aa", text_color="#e6edf3", button_color="#0d1117")
+        fg_color="#30363d", progress_color="#00d4aa", text_color="#e6edf3", button_color="#ffffff")
         ver_toggle.grid(row=0, column=1, padx=(0, 12), pady=6, sticky="w")
 
         # Max versions per vault
@@ -4058,20 +4058,25 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         def click_handler(event=None):
             self._download_update(update_info["url"])
             
+        # Left container for text
+        text_container = ctk.CTkFrame(self._update_frame, fg_color="transparent")
+        text_container.pack(side="left", fill="x", expand=True)
+        text_container.bind("<Button-1>", click_handler)
+            
         # Banner layout
-        lbl_new = ctk.CTkLabel(self._update_frame, text=f"🔄 New version: v{update_info['version']}", text_color="#00d4aa", font=ctk.CTkFont(size=12), cursor="hand2")
-        lbl_new.pack(side="top", anchor="w")
+        lbl_new = ctk.CTkLabel(text_container, text=f"🔄 New version: v{update_info['version']}", text_color="#00d4aa", font=ctk.CTkFont(size=14), cursor="hand2")
+        lbl_new.pack(side="top", anchor="w", padx=(12, 0))
         lbl_new.bind("<Button-1>", click_handler)
         
-        lbl_dl = ctk.CTkLabel(self._update_frame, text="Click to download", text_color="#7d8590", font=ctk.CTkFont(size=12), cursor="hand2")
-        lbl_dl.pack(side="top", anchor="w")
+        lbl_dl = ctk.CTkLabel(text_container, text="Click to download", text_color="#7d8590", font=ctk.CTkFont(size=14), cursor="hand2")
+        lbl_dl.pack(side="top", anchor="w", padx=(12, 0))
         lbl_dl.bind("<Button-1>", click_handler)
         
         self._update_frame.bind("<Button-1>", click_handler)
         
-        # Close button
+        # Close button on the right
         btn_close = ctk.CTkButton(self._update_frame, text="✕", width=20, height=20, fg_color="transparent", text_color="#7d8590", hover_color="#30363d", corner_radius=4)
-        btn_close.place(relx=1.0, rely=0.0, anchor="ne")
+        btn_close.pack(side="right", padx=(0, 4))
         
         def destroy_banner():
             if self._update_frame.winfo_exists():

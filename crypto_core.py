@@ -33,6 +33,7 @@ Author: Senior Python Security Developer
 
 import os
 import json
+import hmac
 import struct
 import base64
 import logging
@@ -776,7 +777,7 @@ class VaultCrypto:
                     # Fix up the payload offset to point to the start of the hidden payload
                     payload_offset = h_offset + self.HIDDEN_TOTAL_HEADER_BYTES
                 except AuthenticationError as hidden_exc:
-                    raise AuthenticationError(f"Vault access denied (Decoy: {exc}, Hidden: {hidden_exc})") from exc
+                    raise AuthenticationError("Vault access denied: Invalid password or corrupted vault envelope.") from exc
             else:
                 raise AuthenticationError(f"Vault access denied: {exc}") from exc
 
@@ -931,7 +932,7 @@ class VaultCrypto:
         """
         import hmac, hashlib, json
 
-        if password_a == password_b:
+        if hmac.compare_digest(password_a.encode('utf-8'), password_b.encode('utf-8')):
             raise ValueError("Decoy and Hidden passwords must be different.")
 
         # 1. Determine sizes
@@ -1121,7 +1122,7 @@ class VaultCrypto:
                     header.recovery_envelope = None
                     return header
                 except AuthenticationError as hidden_exc:
-                    raise AuthenticationError(f"Vault access denied (Decoy: {exc}, Hidden: {hidden_exc})") from exc
+                    raise AuthenticationError("Vault access denied: Invalid password or corrupted vault envelope.") from exc
             raise AuthenticationError(f"Vault access denied: {exc}") from exc
 
         return header
