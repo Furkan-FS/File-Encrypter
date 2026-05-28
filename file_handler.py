@@ -155,7 +155,8 @@ class FolderPackager:
         self,
         source_path: Path,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        exclude_paths: Optional[List[Path]] = None
+        exclude_paths: Optional[List[Path]] = None,
+        compress: bool = False
     ) -> Path:
         """
         Recursively zip a folder into a temporary archive.
@@ -189,7 +190,8 @@ class FolderPackager:
 
         try:
             with os.fdopen(temp_fd, 'wb') as temp_file:
-                with zipfile.ZipFile(temp_file, 'w', zipfile.ZIP_STORED) as zf:
+                compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+                with zipfile.ZipFile(temp_file, 'w', compression) as zf:
                     for file_path in source_path.rglob('*'):
                         if file_path.is_file() and not is_excluded(file_path):
                             arcname = str(file_path.relative_to(source_path))
@@ -215,7 +217,8 @@ class FolderPackager:
         self,
         file_paths: List[Path],
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        exclude_paths: Optional[List[Path]] = None
+        exclude_paths: Optional[List[Path]] = None,
+        compress: bool = False
     ) -> Path:
         """
         Create a zip archive containing multiple individual files.
@@ -242,7 +245,8 @@ class FolderPackager:
 
         try:
             with os.fdopen(temp_fd, 'wb') as temp_file:
-                with zipfile.ZipFile(temp_file, 'w', zipfile.ZIP_STORED) as zf:
+                compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+                with zipfile.ZipFile(temp_file, 'w', compression) as zf:
                     for file_path in valid_files:
                         if file_path.exists() and file_path.is_file():
                             zf.write(file_path, file_path.name)
