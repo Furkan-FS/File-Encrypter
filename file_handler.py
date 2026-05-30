@@ -29,6 +29,14 @@ from crypto_core import VaultCrypto, VaultHeader, AuthenticationError, VaultForm
 
 logger = logging.getLogger(__name__)
 
+# H3 FIX: Overwrite random data in bounded chunks so wiping a multi-gigabyte
+# file uses constant memory instead of allocating the whole file at once.
+WIPE_CHUNK_SIZE = 1 * 1024 * 1024  # 1 MiB
+
+# M4 FIX: Hard ceiling on total uncompressed size during extraction to defeat
+# zip bombs (a small archive that expands to fill the disk).
+MAX_EXTRACT_SIZE = 10 * 1024 * 1024 * 1024  # 10 GiB
+
 
 # ------------------------------------------------------------------------------
 # SECURE FILE WIPER
@@ -84,8 +92,15 @@ class SecureWiper:
                 size = os.fstat(f.fileno()).st_size
                 if size > 0:
                     for _ in range(self.passes):
+                        # H3 FIX: write random data in bounded chunks instead of
+                        # allocating `size` bytes at once (prevents MemoryError on
+                        # multi-gigabyte files).
                         f.seek(0)
-                        f.write(secrets.token_bytes(size))
+                        bytes_written = 0
+                        while bytes_written < size:
+                            chunk_size = min(WIPE_CHUNK_SIZE, size - bytes_written)
+                            f.write(secrets.token_bytes(chunk_size))
+                            bytes_written += chunk_size
                         f.flush()
                         os.fsync(f.fileno())
             success = True
@@ -93,13 +108,23 @@ class SecureWiper:
         except OSError as exc:
             logger.error("Failed to overwrite %s: %s", path, exc)
         finally:
-            try:
-                path.unlink()
-                logger.info("Securely wiped file: %s", path)
-            except Exception as del_exc:
-                if success:
+            # H2 FIX: Only delete the file if the overwrite actually succeeded.
+            # Unlinking after a failed overwrite would leave recoverable plaintext
+            # while falsely reporting a secure wipe. On failure, keep the file and
+            # raise so the caller learns the wipe did not happen.
+            if success:
+                try:
+                    path.unlink()
+                    logger.info("Securely wiped file: %s", path)
+                except Exception as del_exc:
                     logger.critical("Wiped file could not be deleted: %s - %s", path, del_exc)
-                raise
+                    raise
+            else:
+                logger.critical(
+                    "Failed to overwrite %s. File was NOT deleted to prevent plaintext recovery.",
+                    path
+                )
+                raise OSError(f"Secure wipe failed for {path}. File remains on disk.")
 
     def wipe_folder(self, path: Path) -> None:
         """
@@ -355,10 +380,26 @@ class FolderPackager:
 
         output_dir_resolved = output_dir.resolve()
 
+        # M4 FIX: Track cumulative uncompressed size to abort on zip bombs.
+        cumulative_size = 0
+
         with zipfile.ZipFile(archive_path, 'r') as zf:
             total = len(zf.namelist())
             for idx, member in enumerate(zf.namelist(), 1):
                 info = zf.getinfo(member)
+
+                # M4 FIX: Reject archives whose declared uncompressed size exceeds
+                # the safety ceiling before extracting the offending member.
+                member_size = info.file_size
+                cumulative_size += member_size
+                if cumulative_size > MAX_EXTRACT_SIZE:
+                    logger.error(
+                        "Zip Bomb detected! Extracted size exceeds %d bytes.",
+                        MAX_EXTRACT_SIZE
+                    )
+                    raise VaultFormatError(
+                        "Archive extraction aborted: decompressed size exceeds safety limit."
+                    )
 
                 unix_mode = (info.external_attr >> 16) & 0xFFFF
                 if unix_mode and (unix_mode & 0o170000) == 0o120000:

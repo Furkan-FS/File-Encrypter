@@ -27,7 +27,11 @@ class ActivityLogger:
     Thread-safe SQLite wrapper for the activity feed.
     """
 
-    def __init__(self):
+    def __init__(self, enabled: bool = True):
+        # F4 FIX: When logging is disabled, the logger still initializes (so the
+        # schema exists if logging is re-enabled at runtime) but log_event writes
+        # nothing to disk. Defaults to True to preserve existing behavior.
+        self.enabled = enabled
         self._lock = threading.Lock()
         self._init_db()
 
@@ -61,6 +65,9 @@ class ActivityLogger:
             status: 'Success', 'Failed', 'Warning'.
             details: Optional extra information (e.g., error messages). Do NOT include sensitive data.
         """
+        # F4 FIX: Respect the disabled state — write nothing when logging is off.
+        if not self.enabled:
+            return
         timestamp = datetime.now().isoformat(sep=" ", timespec="seconds")
         try:
             with self._lock:

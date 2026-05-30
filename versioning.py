@@ -16,6 +16,7 @@ Design constraints:
   - Atomic restore via write-temp-then-replace.
 """
 
+import hashlib
 import logging
 import os
 import shutil
@@ -288,8 +289,14 @@ class VaultVersionManager:
     def _vault_versions_dir(self, vault_path: Path) -> Path:
         """Return the per-vault subdirectory inside the versions root."""
         # Normalise: strip leading dots and spaces for filesystem safety
-        stem = vault_path.stem.strip(". ") or "unnamed"
-        return self.versions_root / stem
+        resolved_path = vault_path.resolve()
+        stem = resolved_path.stem.strip(". ") or "unnamed"
+
+        # F3 FIX: Append a short hash of the full resolved path to prevent
+        # collisions between vaults with the same name in different directories.
+        path_hash = hashlib.sha256(str(resolved_path).encode('utf-8')).hexdigest()[:8]
+
+        return self.versions_root / f"{stem}_{path_hash}"
 
     def _parse_timestamp(self, file_path: Path, vault_stem: str) -> Optional[datetime]:
         """

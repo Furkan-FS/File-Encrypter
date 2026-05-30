@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 import struct
 
 from crypto_core import (
-    VAULT_MAGIC, VAULT_VERSION, VaultFormatError
+    VAULT_MAGIC, VAULT_VERSION, VaultFormatError, MAX_HEADER_SIZE
 )
 
 logger = logging.getLogger(__name__)
@@ -33,30 +33,53 @@ class VaultScanner:
             logger.error(f"Failed to save library cache: {e}")
 
     def _extract_metadata(self, path: Path) -> Dict[str, Any]:
-        """Extract unencrypted metadata directly from vault header."""
+        """
+        Extract the limited, non-sensitive metadata available from a vault header
+        WITHOUT a password.
+
+        F1/C2 FIX: format v3 keeps the original filename, the full file manifest
+        AND the true payload size inside an AES-256-GCM block sealed under the
+        DEK, NOT in the cleartext header. Without the password the scanner can
+        therefore only report the on-disk ``.vault`` name and the (cleartext)
+        bucketed ``container_size``; the rest is shown as locked until the user
+        supplies a password.
+        """
         with open(path, "rb") as f:
             magic = f.read(len(VAULT_MAGIC))
             if magic != VAULT_MAGIC:
                 raise VaultFormatError("Invalid vault magic bytes")
-            
+
             (version,) = struct.unpack("!B", f.read(1))
             if version != VAULT_VERSION:
                 raise VaultFormatError(f"Unsupported vault version: {version}")
-                
+
             (header_len,) = struct.unpack("!I", f.read(4))
+            # M1 FIX: Bound the attacker-controlled header length before reading.
+            # Without this, a malicious/corrupted vault declaring a multi-gigabyte
+            # header would make the background scan allocate gigabytes and crash.
+            if header_len > MAX_HEADER_SIZE:
+                raise VaultFormatError(f"Vault header length ({header_len}) exceeds maximum allowed size")
             header_json_bytes = f.read(header_len)
-            
+
             header_dict = json.loads(header_json_bytes.decode('utf-8'))
-            
             payload = header_dict.get("payload", {})
-            metadata = payload.get("metadata", {}) or {}
-            
-            return {
-                "filename": payload.get("filename", path.name),
-                "original_size": payload.get("original_size", 0),
-                "source_type": metadata.get("source_type", "folder/file"),
-                "created_at": metadata.get("created_at", "Unknown"),
-            }
+
+            # F1/C2 FIX: v3 vaults expose no filenames, manifests, timestamps, or
+            # true payload size in the cleartext header. Do NOT attempt to read
+            # them — return a generic, locked entry. The only cleartext size is
+            # the bucketed container_size, reported under its own key. The Library
+            # still has a stale-cache fallback for older cache entries.
+            if version == 3:
+                try:
+                    container_size = int(payload.get("container_size", 0))
+                except (TypeError, ValueError):
+                    container_size = 0
+                return {
+                    "filename": path.name,  # Only the .vault file name on disk is known
+                    "container_size": container_size,  # = bucketed size; no real-size leak
+                    "source_type": "Encrypted Metadata",
+                    "created_at": "Requires Password",
+                }
 
     def scan_directories(self, directories: List[str]) -> List[Dict[str, Any]]:
         """
@@ -99,7 +122,7 @@ class VaultScanner:
                             "mtime": mtime,
                             "encrypted_size": size,
                             "filename": meta.get("filename"),
-                            "original_size": meta.get("original_size"),
+                            "container_size": meta.get("container_size"),
                             "source_type": meta.get("source_type"),
                             "created_at": meta.get("created_at"),
                         }

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-RPM Encrypter - Main GUI Application  (Enhanced v2.1 - FIXED)
+RPM Encrypter - Main GUI Application  (v3.0 - Vault Format v2)
 ==============================================================
+Version is defined once as APP_VERSION below (single source of truth).
+The "Major Fixes in v2.1" list is retained as historical changelog.
 
 Major Fixes in v2.1:
   - Thread lifecycle management (graceful shutdown, cancel support)
@@ -93,7 +95,7 @@ logger = logging.getLogger("RPM_GUI")
 # ------------------------------------------------------------------------------
 
 APP_NAME        = "RPM Encrypter"
-APP_VERSION     = "2.0.0"
+APP_VERSION     = "3.0.0"   # F7: single source of truth; bumped for the breaking Vault Format v2 (Phase 22)
 CONFIG_FILE     = Path.home() / ".rpm_encrypter.json"
 MAX_RECENT      = 8
 MAX_ATTEMPTS    = 5
@@ -108,6 +110,23 @@ STRENGTH_COLORS = {
     3: ("#44aa44", "Strong"),
     4: ("#008800", "Very Strong"),
 }
+
+# C2 (Phase 24): "Container Size" selector options and label -> MiB mapping.
+# "Auto" (0) lets crypto_core pick the smallest 1.25x ladder bucket; an explicit
+# choice sets a floor. GB labels are 1024 MB.
+CONTAINER_SIZE_CHOICES = ["Auto", "100 MB", "500 MB", "1 GB", "2 GB", "5 GB", "10 GB"]
+
+def container_label_to_mb(label: str) -> int:
+    """Map a Container Size label (e.g. '1 GB', '100 MB', 'Auto') to MiB (Auto -> 0)."""
+    if not label or label.strip().lower() == "auto":
+        return 0
+    parts = label.split()
+    try:
+        num = int(parts[0])
+    except (ValueError, IndexError):
+        return 0
+    unit = parts[1].upper() if len(parts) > 1 else "MB"
+    return num * 1024 if unit == "GB" else num
 
 
 # ==============================================================================
@@ -576,7 +595,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.inspector = VaultInspector(self.crypto)
         self.limiter   = AttemptLimiter()
         self.stats     = SessionStats()
-        self.activity_logger = activity_log.ActivityLogger()
+        self.activity_logger = activity_log.ActivityLogger(enabled=get_setting("logging_enabled", True))
         self.scanner = vault_scanner.VaultScanner()
         self.versioner = self._build_versioner()
 
@@ -626,20 +645,28 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         import glob
         temp_dir = tempfile.gettempdir()
         
+        # H4 FIX: orphaned temporaries are decrypted PLAINTEXT left behind by a
+        # previous run that crashed/was killed before its own cleanup. Securely
+        # wipe them instead of using a bare os.remove()/rmtree() that would leave
+        # recoverable plaintext in free space. If a secure wipe fails, fall back to
+        # a plain delete so startup cleanup still makes a best effort.
         # Cleanup temp zips
         for p in glob.glob(os.path.join(temp_dir, '.rpm_extract_*.zip')):
             try:
-                os.remove(p)
+                self.wiper.wipe_file(Path(p))
             except Exception:
-                pass
-                
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
         # Cleanup temp extraction dirs
         for p in glob.glob(os.path.join(temp_dir, '.rpm_extract_dir_*')):
             if os.path.isdir(p):
                 try:
-                    shutil.rmtree(p, ignore_errors=True)
+                    self.wiper.wipe_folder(Path(p))
                 except Exception:
-                    pass
+                    shutil.rmtree(p, ignore_errors=True)
 
     # ==========================================================================
     # VERSIONING INITIALISATION
@@ -901,11 +928,16 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for p in files_to_clean:
             try:
                 if p.exists():
-                    p.unlink()
-                    logger.info("Cleaned up temp file on exit: %s", p)
+                    # H4 FIX: these are decrypted PLAINTEXT temporaries. Securely
+                    # wipe them rather than merely unlinking so no recoverable copy
+                    # is left behind on exit. Wrapped in try/except so a wipe
+                    # failure (or a slow/hung wipe surfacing as OSError) can never
+                    # stop the app from closing.
+                    self.wiper.wipe_file(p)
+                    logger.info("Securely wiped temp file on exit: %s", p)
             except Exception as exc:
-                logger.warning("Failed to clean temp file %s: %s", p, exc)
-        
+                logger.warning("Failed to wipe temp file %s: %s", p, exc)
+
         self.destroy()
 
     # ==========================================================================
@@ -1069,9 +1101,14 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # Target Size
         ts_row = ctk.CTkFrame(self.hidden_frame, fg_color="transparent", corner_radius=0)
         ts_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
-        ctk.CTkLabel(ts_row, text="Target Vault Size:", font=ctk.CTkFont(size=14), text_color="#e6edf3").pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(ts_row, text="Container Size:", font=ctk.CTkFont(size=14), text_color="#e6edf3").pack(side="left", padx=(0, 8))
+        # C2/Phase 24: hidden vaults require an EXPLICIT container size (no "Auto")
+        # so a small decoy is never auto-placed in a minimal bucket that would
+        # betray the hidden compartment.
         self.hidden_size_var = ctk.StringVar(value="100 MB")
         ctk.CTkOptionMenu(ts_row, variable=self.hidden_size_var, values=["10 MB", "100 MB", "500 MB", "1 GB", "5 GB", "10 GB"], fg_color="#161b22", text_color="#e6edf3", button_color="#30363d", height=36, corner_radius=6).pack(side="left")
+        ctk.CTkLabel(ts_row, text="(pick a size larger than your data — a larger container is a normal choice)",
+                     font=ctk.CTkFont(size=12), text_color="#7d8590").pack(side="left", padx=(8, 0))
 
         # --- Options row ---
         opts = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
@@ -1102,6 +1139,14 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                         variable=self.compress_var,
                         font=ctk.CTkFont(size=14),
                         fg_color="#30363d", progress_color="#00d4aa", button_color="#ffffff", text_color="#e6edf3").pack(side="left", padx=(0, 10))
+
+        # C2 (Phase 24): Container Size selector. "Auto" pads to the smallest
+        # 1.25x ladder bucket; an explicit choice sets a larger floor so the
+        # on-disk size reveals nothing about the true payload size.
+        ctk.CTkLabel(opts, text="Container Size:", font=ctk.CTkFont(size=14), text_color="#e6edf3").pack(side="left", padx=(0, 8))
+        self.enc_container_var = ctk.StringVar(value="Auto")
+        ctk.CTkOptionMenu(opts, variable=self.enc_container_var, values=CONTAINER_SIZE_CHOICES,
+                          fg_color="#161b22", text_color="#e6edf3", button_color="#30363d", height=36, corner_radius=6).pack(side="left", padx=(0, 10))
 
         # Output directory override
         self._enc_outdir_row = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
@@ -1397,9 +1442,28 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._set_status("Deriving key (Argon2id)…")
 
         paths = [item["path"] for item in self.batch_queue]
+
+        # F5 FIX: Tkinter is not thread-safe. Snapshot every hidden-mode Tk
+        # variable here on the main thread and hand the worker plain Python
+        # values. The worker must never call .get() on a Tk variable.
+        hidden_mode_on = bool(self.hidden_mode_var.get())
+        hidden_password = self.hidden_pw.get() if hidden_mode_on else None
+        hidden_size_str = self.hidden_size_var.get()
+        hidden_sources = list(self._hidden_sources_list)
+        # C2 (Phase 24): snapshot the "Container Size" choice on the main thread
+        # (F5 pattern — never call .get() on a Tk var inside the worker).
+        container_mb = container_label_to_mb(self.enc_container_var.get())
+
         self.worker_thread = threading.Thread(
             target=self._batch_encrypt_worker,
             args=(paths, password, self.enc_wipe_var.get(), out_dir_override, result_key[0], getattr(self, "compress_var", None) and self.compress_var.get()),
+            kwargs=dict(
+                hidden_mode=hidden_mode_on,
+                hidden_password=hidden_password,
+                hidden_size_str=hidden_size_str,
+                hidden_sources=hidden_sources,
+                container_mb=container_mb,
+            ),
             daemon=True,
         )
         self.worker_thread.start()
@@ -1411,24 +1475,43 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         secure_wipe: bool,
         out_dir_override: Optional[Path],
         recovery_key: Optional[bytes] = None,
-        compress: bool = False
+        compress: bool = False,
+        hidden_mode: bool = False,
+        hidden_password: Optional[str] = None,
+        hidden_size_str: Optional[str] = None,
+        hidden_sources: Optional[List[str]] = None,
+        container_mb: int = 0
     ) -> None:
         total = len(paths)
         success = 0
         total_orig_size = 0
         total_vault_size = 0
         
-        hidden_mode = getattr(self, "hidden_mode_var", None) and self.hidden_mode_var.get()
+        # F6 FIX: Initialize cleanup/reporting handles up front so control flow
+        # tests `is not None` instead of brittle runtime name introspection.
+        decoy_tmp = None
+        hidden_tmp = None
+        out_path = None
+        final_vault = None
+
+        # F5 FIX: hidden_mode and the hidden inputs were snapshotted on the main
+        # thread and passed in. hidden_sources is a plain list, never a Tk var.
+        hidden_sources = list(hidden_sources) if hidden_sources else []
+
         if hidden_mode:
             self._qlog("--- CREATING HIDDEN VAULT ---")
             try:
                 # Target size parsing
-                size_str = self.hidden_size_var.get()
+                size_str = hidden_size_str or "100 MB"
                 multiplier = 1024*1024
                 if "GB" in size_str: multiplier = 1024*1024*1024
                 target_size = int(size_str.split()[0]) * multiplier
+                # C2 (Phase 24): the hidden vault's final on-disk size is snapped
+                # to a 1.25x ladder bucket with this explicit container as the
+                # floor, so it is size-indistinguishable from a normal vault.
+                hidden_container_mb = container_label_to_mb(size_str)
                 
-                h_paths = [Path(p) for p in self._hidden_sources_list]
+                h_paths = [Path(p) for p in hidden_sources]
                 
                 # Accumulate sizes for hidden mode
                 for p in paths + h_paths:
@@ -1496,14 +1579,15 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 with open(decoy_tmp, 'rb') as dec_in, open(hidden_tmp, 'rb') as hid_in, open(final_vault, 'wb') as v_out:
                     header = self.crypto.encrypt_hidden_vault(
                         dec_in, hid_in, v_out,
-                        password_a=password, password_b=self.hidden_pw.get(),
+                        password_a=password, password_b=hidden_password,
                         target_total_size=target_size,
                         decoy_filename=decoy_filename,
                         hidden_filename=hidden_filename,
                         decoy_metadata=dec_meta,
                         hidden_metadata=hid_meta,
                         progress_callback=prog,
-                        recovery_key=recovery_key
+                        recovery_key=recovery_key,
+                        target_container_mb=hidden_container_mb
                     )
                 
                 self._qlog("Hidden Vault Creation Complete!")
@@ -1516,7 +1600,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 
                 if secure_wipe:
                     self._qlog("Securely wiping original sources...")
-                    for s in paths + [Path(p) for p in self._hidden_sources_list]:
+                    for s in paths + [Path(p) for p in hidden_sources]:
                         if s.is_dir(): self.wiper.wipe_folder(s)
                         else: self.wiper.wipe_file(s)
                         
@@ -1525,8 +1609,8 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception as exc:
                 self._qlog(f"✗ FAILED: {exc}")
             finally:
-                if 'decoy_tmp' in locals() and decoy_tmp.exists(): self.wiper.wipe_file(decoy_tmp)
-                if 'hidden_tmp' in locals() and hidden_tmp.exists(): self.wiper.wipe_file(hidden_tmp)
+                if decoy_tmp is not None and decoy_tmp.exists(): self.wiper.wipe_file(decoy_tmp)
+                if hidden_tmp is not None and hidden_tmp.exists(): self.wiper.wipe_file(hidden_tmp)
                 
         else:
             for idx, path in enumerate(paths, 1):
@@ -1580,7 +1664,8 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                         original_filename=path.name,
                         metadata=manifest,
                         progress_callback=prog,
-                        recovery_key=recovery_key
+                        recovery_key=recovery_key,
+                        target_container_mb=container_mb
                     )
 
                     if secure_wipe:
@@ -1597,12 +1682,12 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
                     self._qlog(f"[{idx}/{total}] ✓ Done     →  {out_path.name}")
                     success += 1
-                    self.activity_logger.log_event("Encrypt", path.name, "Success", f"Output: {out_path.name}")
+                    self._log_activity("Encrypt", path.name, "Success", f"Output: {out_path.name}")
 
                 except Exception as exc:
                     logger.exception("Encryption failed for %s", path)
                     self._qlog(f"[{idx}/{total}] ✗ FAILED: {exc}")
-                    self.activity_logger.log_event("Encrypt", path.name, "Failed", str(exc))
+                    self._log_activity("Encrypt", path.name, "Failed", str(exc))
                     try:
                         self.msg_queue.put({"type": "error", "text": f"✗ {path.name}: {exc}"}, timeout=0.1)
                     except queue.Full:
@@ -1632,7 +1717,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         extra_msg = ""
         if compress:
             try:
-                vault_size = os.path.getsize(out_path) if 'out_path' in locals() else (os.path.getsize(final_vault) if 'final_vault' in locals() else 0)
+                vault_size = os.path.getsize(out_path) if out_path is not None else (os.path.getsize(final_vault) if final_vault is not None else 0)
                 if total_orig_size > 0 and vault_size > 0 and vault_size < total_orig_size:
                     ratio = round((1 - vault_size / total_orig_size) * 100)
                     vault_mb = vault_size / (1024 * 1024)
@@ -1961,12 +2046,12 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._qlog(f"[{idx}/{total}] ✓ Restored →  {extract_dir.name}")
                 success += 1
                 self.limiter.record_success()
-                self.activity_logger.log_event("Decrypt", path.name, "Success", f"Output: {extract_dir.name}")
+                self._log_activity("Decrypt", path.name, "Success", f"Output: {extract_dir.name}")
 
             except AuthenticationError:
                 auth_error = True
                 self.limiter.record_failure()
-                self.activity_logger.log_event("Decrypt", path.name, "Failed", "Authentication Error")
+                self._log_activity("Decrypt", path.name, "Failed", "Authentication Error")
                 _, secs = self.limiter.is_locked()
                 rem = self.limiter.attempts_remaining()
                 if secs:
@@ -1983,7 +2068,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception as exc:
                 logger.exception("Decryption failed for %s", path)
                 self._qlog(f"[{idx}/{total}] ✗ FAILED: {exc}")
-                self.activity_logger.log_event("Decrypt", path.name, "Failed", str(exc))
+                self._log_activity("Decrypt", path.name, "Failed", str(exc))
 
             finally:
                 if temp_zip:
@@ -1992,12 +2077,17 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                             self._active_temp_files.remove(temp_zip)
                         except ValueError:
                             pass
-                    
+
+                    # H4 FIX: temp_zip is the fully decrypted PLAINTEXT archive. A
+                    # bare unlink() leaves a recoverable copy in the output folder's
+                    # free space. Route removal through the secure wiper (chunked +
+                    # truthful-failure, Phase 17). Failures are logged, not silently
+                    # swallowed, but must not break the per-file decrypt loop.
                     try:
                         if temp_zip.exists():
-                            temp_zip.unlink()
-                    except Exception:
-                        pass
+                            self.wiper.wipe_file(temp_zip)
+                    except Exception as wipe_exc:
+                        logger.warning("Failed to securely wipe temp file %s: %s", temp_zip, wipe_exc)
 
         text = (f"Wrong password or corrupted vault — {self.limiter.attempts_remaining()} "
                 f"attempts remaining"
@@ -2139,6 +2229,98 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._refresh_fingerprint_panel()
         self._set_status("All fingerprints cleared")
 
+    def _log_activity(self, action: str, filename: str, status: str, details: str = "") -> None:
+        """
+        F4 FIX: Single choke point for activity logging. Writes an event only
+        when the user has left 'Enable Activity Logging' on (default True). The
+        setting is read live, so toggling it takes effect immediately; the
+        ActivityLogger is also gated via its own `enabled` flag (defence in depth).
+        """
+        if get_setting("logging_enabled", True):
+            self.activity_logger.log_event(action, filename, status, details)
+
+    def _save_logging_setting(self) -> None:
+        """Persist the activity-logging toggle and apply it to the live logger."""
+        enabled = bool(self.logging_enabled_var.get())
+        save_setting("logging_enabled", enabled)
+        try:
+            self.activity_logger.enabled = enabled
+        except Exception:
+            pass
+        self._set_status("Activity logging " + ("enabled" if enabled else "disabled"))
+
+    def _clear_all_traces(self) -> None:
+        """
+        F4 FIX: One-click erasure of every local forensic trace this app keeps on
+        disk — the activity-log database, the Library cache, saved fingerprints,
+        and the recent-file lists. Encrypted .vault files are never touched.
+        Missing DB/cache files are handled gracefully.
+        """
+        if not messagebox.askyesno(
+            "Clear All Local Traces",
+            "This permanently erases local traces kept by this app:\n\n"
+            "  •  Activity log database\n"
+            "  •  Library cache\n"
+            "  •  Saved fingerprints\n"
+            "  •  Recent encrypt / decrypt / re-key lists\n\n"
+            "Your encrypted .vault files are NOT affected.\n\nContinue?"
+        ):
+            return
+
+        errors = []
+
+        # 1. Activity log database (clear_logs no-ops gracefully if the DB is absent).
+        try:
+            self.activity_logger.clear_logs()
+        except Exception as exc:
+            errors.append(f"activity log: {exc}")
+
+        # 2. Library cache file on disk + the in-memory copy so it is not re-saved.
+        try:
+            vault_scanner.CACHE_FILE.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"library cache: {exc}")
+        try:
+            self.scanner.cache = {}
+        except Exception:
+            pass
+
+        # 3 & 4. Fingerprints and recent-file lists stored in the config.
+        try:
+            cfg = _load_cfg()
+            cfg["fingerprints"] = {}
+            cfg["enc_sources"] = []
+            cfg["dec_sources"] = []
+            cfg["rekey_vaults"] = []
+            _save_cfg(cfg)
+        except Exception as exc:
+            errors.append(f"config: {exc}")
+
+        # Refresh any visible panels so the UI reflects the cleared state.
+        fp_refresh = getattr(self, "_refresh_fingerprint_panel", None)
+        if callable(fp_refresh):
+            try:
+                fp_refresh()
+            except Exception:
+                pass
+        for bar_attr in ("_enc_recent", "_dec_recent", "_rk_recent"):
+            bar = getattr(self, bar_attr, None)
+            if bar is not None:
+                try:
+                    bar.refresh()
+                except Exception:
+                    pass
+
+        if errors:
+            messagebox.showwarning(
+                "Clear All Local Traces",
+                "Completed with some issues:\n\n" + "\n".join(errors))
+        else:
+            messagebox.showinfo(
+                "Clear All Local Traces",
+                "All local traces have been cleared from this device.")
+        self._set_status("Local traces cleared")
+
     def _browse_inspect(self) -> None:
         path = filedialog.askopenfilename(
             title="Select Vault File",
@@ -2183,10 +2365,10 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._ins_attempts_lbl.configure(text="")
             self._render_inspect_results(metadata)
             self._set_status("Vault inspection complete")
-            self.activity_logger.log_event("Inspect", Path(path_str).name, "Success")
+            self._log_activity("Inspect", Path(path_str).name, "Success")
         except AuthenticationError:
             self.limiter.record_failure()
-            self.activity_logger.log_event("Inspect", Path(path_str).name, "Failed", "Authentication Error")
+            self._log_activity("Inspect", Path(path_str).name, "Failed", "Authentication Error")
             _, secs = self.limiter.is_locked()
             rem = self.limiter.attempts_remaining()
             if secs:
@@ -2197,7 +2379,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     text=f"Wrong password — {rem} attempts remaining")
             messagebox.showerror("Access Denied", "Invalid password or corrupted vault envelope.")
         except Exception as exc:
-            self.activity_logger.log_event("Inspect", Path(path_str).name, "Failed", str(exc))
+            self._log_activity("Inspect", Path(path_str).name, "Failed", str(exc))
             messagebox.showerror("Error", f"Inspection failed: {exc}")
 
     def _open_selective_extract(self) -> None:
@@ -2519,7 +2701,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._set_status("Integrity check complete — fingerprint saved" if ok
                          else "Integrity check failed")
         
-        self.activity_logger.log_event("Integrity", path.name, "Success" if ok else "Failed", f"SHA: {sha[:16]}" if ok else msg)
+        self._log_activity("Integrity", path.name, "Success" if ok else "Failed", f"SHA: {sha[:16]}" if ok else msg)
 
     @staticmethod
     def _save_fingerprint(path: Path, sha: str) -> None:
@@ -2899,7 +3081,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             copy_path = self.versioner.restore_as_copy(entry, vault)
             self._set_status(f"Restored copy: {copy_path.name}")
             messagebox.showinfo("Restored", f"Version restored as a new copy:\n{copy_path.name}\n\nThe original vault was not modified.")
-            self.activity_logger.log_event("Version Restore", vault.name, "Success", f"Copy: {copy_path.name}")
+            self._log_activity("Version Restore", vault.name, "Success", f"Copy: {copy_path.name}")
         except OSError as exc:
             messagebox.showerror("Restore Failed", f"Could not restore version:\n{exc}")
 
@@ -2923,7 +3105,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.versioner.replace_current(entry, vault)
             self._set_status(f"Vault restored from version {entry.display_timestamp}")
             messagebox.showinfo("Restored", f"Vault successfully replaced with version from {entry.display_timestamp}.")
-            self.activity_logger.log_event("Version Replace", vault.name, "Success", f"From: {entry.path.name}")
+            self._log_activity("Version Replace", vault.name, "Success", f"From: {entry.path.name}")
             self._refresh_version_list()
         except OSError as exc:
             messagebox.showerror("Replace Failed", f"Could not replace vault:\n{exc}")
@@ -3055,7 +3237,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             self.stats.add_rekeyed()
             self._qlog(f"✓ Re-key complete  →  {vault.name}")
-            self.activity_logger.log_event("Re-Key", vault.name, "Success")
+            self._log_activity("Re-Key", vault.name, "Success")
             push_recent("rekey_vaults", str(vault))
             try:
                 self.msg_queue.put({
@@ -3066,7 +3248,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 pass
         except AuthenticationError:
             self._qlog("✗ Wrong current password")
-            self.activity_logger.log_event("Re-Key", vault.name, "Failed", "Wrong current password")
+            self._log_activity("Re-Key", vault.name, "Failed", "Wrong current password")
             try:
                 self.msg_queue.put({
                     "type": "batch_done",
@@ -3074,10 +3256,33 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 }, timeout=1.0)
             except queue.Full:
                 pass
+        except CryptoError as exc:
+            # F2 FIX: Surface the hidden-compartment re-key guard (and any other
+            # CryptoError) with a clear, truthful message instead of a confusing
+            # generic failure. Routed through "batch_done" — like the other
+            # terminal outcomes in this worker — so the Re-Key button is
+            # re-enabled and the UI never looks frozen/broken to the user.
+            if "Re-Key is not supported for vaults containing a hidden compartment" in str(exc):
+                # Specific, clear error for the F2 guard.
+                self._qlog(f"✗ {exc}")
+                self._log_activity("Re-Key", vault.name, "Blocked", "Hidden compartment present")
+                text = str(exc)
+            else:
+                logger.exception("Re-key failed for %s", vault)
+                self._qlog(f"✗ FAILED: {exc}")
+                self._log_activity("Re-Key", vault.name, "Failed", str(exc))
+                text = f"Re-key failed: {exc}"
+            try:
+                self.msg_queue.put({
+                    "type": "batch_done",
+                    "text": text,
+                }, timeout=1.0)
+            except queue.Full:
+                pass
         except Exception as exc:
             logger.exception("Re-key failed for %s", vault)
             self._qlog(f"✗ FAILED: {exc}")
-            self.activity_logger.log_event("Re-Key", vault.name, "Failed", str(exc))
+            self._log_activity("Re-Key", vault.name, "Failed", str(exc))
             try:
                 self.msg_queue.put({
                     "type": "batch_done",
@@ -3276,13 +3481,23 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         frame = ctk.CTkScrollableFrame(page_frame, fg_color="transparent", corner_radius=0)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(2, weight=1)
+        frame.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(frame, text="Vault Library", font=ctk.CTkFont(size=22, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, pady=(0, 20), sticky="w")
-        
+
+        # M5 FIX: The Library list is built from UNVERIFIED vault headers (read
+        # without a password). Warn the user that these fields can be spoofed so
+        # header-derived strings are never mistaken for authenticated data.
+        ctk.CTkLabel(
+            frame,
+            text="⚠️ Vault metadata is read without authentication and may be spoofed.",
+            font=ctk.CTkFont(size=12),
+            text_color="#7d8590"
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+
         # Search Bar
         search_container = ctk.CTkFrame(frame, fg_color="transparent")
-        search_container.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        search_container.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         
         self.library_search_entry = ctk.CTkEntry(search_container, placeholder_text="Search vaults...", fg_color="#161b22", text_color="#e6edf3", border_color="#30363d", placeholder_text_color="#7d8590", height=36, corner_radius=6)
         self.library_search_entry.pack(fill="x", side="left", expand=True)
@@ -3294,8 +3509,8 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.library_search_clear.pack_forget()
         
         btn_row = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
-        btn_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        
+        btn_row.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
         ctk.CTkButton(btn_row, text="Add Directory",
                       command=self._add_library_dir, fg_color="#21262d", text_color="#e6edf3", hover_color="#30363d", font=ctk.CTkFont(size=14), height=42, corner_radius=8).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Scan Now",
@@ -3308,7 +3523,7 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             wrap="none",
 
         fg_color="#161b22", text_color="#e6edf3", corner_radius=6)
-        self.library_textbox.grid(row=3, column=0, sticky="nsew")
+        self.library_textbox.grid(row=4, column=0, sticky="nsew")
         
         self.after(500, self._scan_library)
         return page_frame
@@ -3380,13 +3595,13 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             # Sort by created_at or path
             filtered.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             
-            header = f"{'FILENAME':<40} | {'ORIGINAL SIZE':<15} | {'SOURCE TYPE':<15} | {'CREATED AT':<25}\n"
+            header = f"{'FILENAME':<40} | {'CONTAINER SIZE':<15} | {'SOURCE TYPE':<15} | {'CREATED AT':<25}\n"
             self.library_textbox.insert("end", header)
             self.library_textbox.insert("end", "-" * 100 + "\n")
             
             for r in filtered:
                 fname = r.get("filename", "Unknown")[:38]
-                sz = r.get("original_size", 0)
+                sz = r.get("container_size", r.get("original_size", 0))
                 sz_str = f"{sz / 1024 / 1024:.2f} MB" if sz > 1024*1024 else f"{sz / 1024:.1f} KB"
                 stype = r.get("source_type", "Unknown")[:13]
                 cat = r.get("created_at", "Unknown")[:23]
@@ -3509,10 +3724,10 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _notes_encrypt_worker(self, text, path, pw):
         try:
             self.crypto.encrypt_note(text, path, pw, note_title=path.name)
-            self.activity_logger.log_event("Note Encrypt", path.name, "Success")
+            self._log_activity("Note Encrypt", path.name, "Success")
             self.msg_queue.put({"type": "batch_done", "text": f"Note saved to {path.name}"}, timeout=1.0)
         except Exception as e:
-            self.activity_logger.log_event("Note Encrypt", path.name, "Failed", str(e))
+            self._log_activity("Note Encrypt", path.name, "Failed", str(e))
             self.msg_queue.put({"type": "batch_done", "text": f"Note save failed: {e}"}, timeout=1.0)
 
     def _load_note(self):
@@ -3536,14 +3751,14 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _notes_decrypt_worker(self, path, pw):
         try:
             text = self.crypto.decrypt_note(path, pw)
-            self.activity_logger.log_event("Note Decrypt", path.name, "Success")
+            self._log_activity("Note Decrypt", path.name, "Success")
             self.msg_queue.put({"type": "note_decrypted", "text": text}, timeout=1.0)
             self.msg_queue.put({"type": "batch_done", "text": f"Note loaded: {path.name}"}, timeout=1.0)
         except AuthenticationError:
-            self.activity_logger.log_event("Note Decrypt", path.name, "Failed", "Auth Error")
+            self._log_activity("Note Decrypt", path.name, "Failed", "Auth Error")
             self.msg_queue.put({"type": "batch_done", "text": "Note load failed: Wrong Password"}, timeout=1.0)
         except Exception as e:
-            self.activity_logger.log_event("Note Decrypt", path.name, "Failed", str(e))
+            self._log_activity("Note Decrypt", path.name, "Failed", str(e))
             self.msg_queue.put({"type": "batch_done", "text": f"Note load failed: {e}"}, timeout=1.0)
 
     # ==========================================================================
@@ -3828,6 +4043,34 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ver_frame,
             text="  Versioning is opt-in. Large vaults (>1 GiB) will be fully copied before each Re-Key.",
             justify="left", font=ctk.CTkFont(size=14), text_color="#e6edf3").grid(row=4, column=0, columnspan=2, padx=12, pady=(4, 6), sticky="w")
+
+        # --- PRIVACY & LOCAL TRACES ---
+        ctk.CTkLabel(frame, text="Privacy & Local Traces", font=ctk.CTkFont(size=14), text_color="#e6edf3").grid(row=row, column=0, sticky="w", pady=(0, 6))
+        row += 1
+
+        privacy_frame = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
+        privacy_frame.grid(row=row, column=0, sticky="w", pady=(0, 10))
+        row += 1
+
+        self.logging_enabled_var = ctk.BooleanVar(value=bool(get_setting("logging_enabled", True)))
+        ctk.CTkSwitch(
+            privacy_frame, text="Enable Activity Logging",
+            variable=self.logging_enabled_var,
+            command=self._save_logging_setting,
+            font=ctk.CTkFont(size=14),
+            fg_color="#30363d", progress_color="#00d4aa", button_color="#ffffff", text_color="#e6edf3"
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            frame, text="⚠️  Clear All Local Traces",
+            command=self._clear_all_traces, fg_color="#f85149", text_color="#0d1117", hover_color="#ff6e6e", font=ctk.CTkFont(size=14, weight="bold"), height=42, corner_radius=8).grid(row=row, column=0, sticky="w", pady=(0, 6))
+        row += 1
+
+        ctk.CTkLabel(
+            frame,
+            text="  Erases the activity log, Library cache, saved fingerprints, and recent-file lists from this device. Vault files are not affected.",
+            justify="left", font=ctk.CTkFont(size=14), text_color="#e6edf3").grid(row=row, column=0, sticky="w", pady=(0, 20))
+        row += 1
 
         # --- ABOUT ---
         ctk.CTkLabel(frame, text="About", font=ctk.CTkFont(size=14), text_color="#e6edf3").grid(row=row, column=0, sticky="w", pady=(0, 6))
@@ -4235,6 +4478,71 @@ class RPMEncrypterApp(ctk.CTk, TkinterDnD.DnDWrapper):
             if hasattr(self, "note_textbox"):
                 self.note_textbox.configure(state="normal")
                 self.note_textbox.insert("end", msg.get("text", ""))
+
+        elif mtype == "recovery_phrase":
+            # H5 FIX: The hidden-vault worker (running off the main thread) cannot
+            # build a dialog itself, so it enqueues the DECOY recovery phrase here.
+            # Previously there was no branch for this message type, so the phrase
+            # was silently discarded — a user who later lost the decoy password
+            # could be permanently locked out. _handle_message runs on the main
+            # thread, so displaying the dialog from here is thread-safe.
+            self._show_recovery_dialog(msg.get("phrase", ""))
+
+    def _show_recovery_dialog(self, phrase: str) -> None:
+        """
+        H5 FIX: Display an already-generated recovery phrase (e.g. the decoy
+        recovery phrase produced by the hidden-vault worker) and force the user
+        to acknowledge it before it disappears.
+
+        This mirrors the read-only recovery-phrase modal the normal encrypt path
+        shows synchronously, reusing the same widgets and styling. It is
+        display-only — the phrase is generated elsewhere — so unlike the encrypt
+        modal it returns no key and gates no operation. Invoked from
+        _handle_message (main thread); the nested wait_window blocks the main
+        window until dismissed so the user cannot miss it.
+        """
+        if not phrase:
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Recovery Phrase")
+        dialog.geometry("550x350")
+        dialog.configure(fg_color="#0d1117")
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="transparent", corner_radius=0)
+        scroll.pack(fill="both", expand=True, padx=20, pady=5)
+
+        ctk.CTkLabel(scroll, text="Your Recovery Phrase", font=ctk.CTkFont(size=14), text_color="#e6edf3").pack(pady=(20, 5))
+        ctk.CTkLabel(scroll, text="Write this down and keep it safe. It will never be shown again.", font=ctk.CTkFont(size=14), text_color="#e6edf3").pack(pady=(0, 15))
+
+        textbox = ctk.CTkTextbox(scroll, wrap="word", font=ctk.CTkFont(size=14), fg_color="#161b22", text_color="#e6edf3", corner_radius=6)
+        textbox.pack(padx=10, fill="x")
+        textbox.insert("0.0", phrase)
+        textbox.configure(state="disabled")
+
+        confirmed = ctk.BooleanVar(value=False)
+        check = ctk.CTkCheckBox(scroll, text="I have securely saved this 24-word phrase.", variable=confirmed, fg_color="#00d4aa", text_color="#e6edf3", border_color="#30363d", checkmark_color="#0d1117")
+        check.pack(pady=20)
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent", corner_radius=0)
+        btn_frame.pack(fill="x", side="bottom", pady=10)
+
+        def on_done():
+            if not confirmed.get():
+                messagebox.showwarning("Confirm", "You must confirm you have saved the phrase.", parent=dialog)
+                return
+            dialog.destroy()
+
+        ctk.CTkButton(btn_frame, text="Done", command=on_done, fg_color="#21262d", text_color="#e6edf3", hover_color="#30363d", font=ctk.CTkFont(size=14), height=42, corner_radius=8).pack(side="right", padx=10)
+
+        # Force acknowledgment: closing via the window's X button must also pass
+        # through on_done() so the phrase cannot be dismissed without confirming.
+        dialog.protocol("WM_DELETE_WINDOW", on_done)
+
+        self.wait_window(dialog)
 
     def _reset_progress_bars(self, success=False):
         """Reset all progress bars to initial state."""
